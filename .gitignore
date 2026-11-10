@@ -30,6 +30,9 @@ output/
 # FFmpeg 二进制（捆绑分发，不入库）
 tools/ffmpeg/
 
+# 运行日志
+logs/
+
 # IDE / 系统
 .vscode/
 .idea/
