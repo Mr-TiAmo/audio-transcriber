@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "audio-transcriber-backend"
+version = "0.1.0"
+description = "本地音频转文字与校对工具 后端（基于 V3.0 设计落地）"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.12"
+authors = [{ name = "win-liao" }]
+
+dependencies = [
+    # 注：torch（CUDA wheel）由 scripts/install.bat 经 pytorch 官方 index 单独安装并锁定版本，
+    # 不放在此处，避免 pip 误装 PyPI 上的 CPU 版。transformers / qwen-asr 在主 venv 运行。
+    "transformers>=4.57",
+    "qwen-asr>=0.0.6",
+    "accelerate>=1.0",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sse-starlette>=2.1",
+    "pydantic>=2.7",
+    "numpy>=1.26",
+    "onnxruntime>=1.18",
+    "av>=11",
+    "typer>=0.12",
+    "rich>=13",
+    "wetext>=0.2.1",
+    "portalocker>=2.10",
+    # FunASR fsmn-vad 特征提取的 fbank 后端（长音频 VAD 主路径必需；
+    # torchaudio 需与 torch 版本耦合且体积大，选轻量 knf wheel）
+    "kaldi-native-fbank>=1.20",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-timeout>=2",
+    "httpx>=0.27",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

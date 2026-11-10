@@ -1,0 +1,36 @@
+# Python
+backend/.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# Node
+frontend/node_modules/
+# 注意：frontend/dist 需要入库 —— start.bat 由 FastAPI 直接托管该目录，保证 clone 后开箱即用
+
+# E2E / Playwright 产物
+frontend/e2e/shots/
+frontend/e2e/results/
+frontend/test-results/
+frontend/playwright-report/
+
+# 模型权重（不入库，由 download_models.bat 下载）
+models/
+
+# 评测数据集（Chinese-LiPS 等，体积大且有第三方许可，需自行下载）
+backend/datasets/
+
+# 运行数据与产物（数据库、评测音频、转写结果均不入库）
+data/*
+!data/.gitkeep
+output/
+
+# FFmpeg 二进制（捆绑分发，不入库）
+tools/ffmpeg/
+
+# IDE / 系统
+.vscode/
+.idea/
+Thumbs.db
+*.log

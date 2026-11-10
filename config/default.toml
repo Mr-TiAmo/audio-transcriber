@@ -1,0 +1,65 @@
+# AudioTranscriber 默认配置（基于 V3.0 设计 §5 实测参数基线）
+# 时间统一使用毫秒（相对原音频起点）
+
+[app]
+name = "AudioTranscriber"
+host = "127.0.0.1"        # 禁止 0.0.0.0（设计 §13.2）
+port = 8730
+data_dir = "../data"       # projects / database / temp / logs
+
+[offline]
+enabled = true
+allow_download_during_transcribe = false
+
+[ffmpeg]
+# 捆绑静态版路径（相对项目根）；start.bat 会加入 PATH
+bin_dir = "../tools/ffmpeg/bin"
+
+[asr]
+provider = "qwen"
+model_name = "Qwen/Qwen3-ASR-0.6B"   # 默认 0.6B（V3.0 实测性价比最优）；1.7B 为质量优先选项
+device = "cuda"                        # Windows Spike 基线：RTX 4060
+dtype = "bfloat16"
+language = "zh"
+batch_size = 4                         # 长音频 balanced 60s 默认 batch 4（1.98× 加速）
+max_inference_seconds = 300            # 单次推理上限（MPS 实测；CUDA 待 Spike 校正）
+empty_transcript_flag = "degraded"     # 空转写标记（flag_empty_transcript）
+
+[vad]
+engine = "silero"
+runtime = "onnx"           # ONNX Runtime CPU，释放 GPU 给 ASR
+min_speech_ms = 300        # 短语音最小长度
+merge_gap_ms = 800         # merge_short_gaps 合并阈值（仅用于下游切分）
+min_valid_pause_ms = 40    # 有效停顿最小阈值（低于此为 VAD 抖动）
+edge_padding_ms = 200      # 片段边缘 padding（150-250ms 区间取中值）
+
+[chunking]
+# 自适应策略决策树（V3.0 §5.3.4）：短音频 silence 120s / 长音频 balanced 60s ± jitter
+short_audio_threshold_min = 5
+silence_target_s = 120     # 短音频（≤5min）质量优先
+balanced_target_s = 60     # 长音频（>5min）速度优先，100% batch 利用率
+jitter_s = 1.0             # 停顿密集场景（≥8 gaps/min）吸附切点；朗读场景（<3 gaps/min）为 0
+overlap_s = 0.5            # 边界声学上下文（不用于防丢词，去重惰性触发）
+sparse_gaps_per_min = 3
+dense_gaps_per_min = 8
+
+[batching]
+batch_max = 4
+# 内存护栏：batch 4 在 MPS 峰值 RSS 约 8.2GB；Windows CUDA 显存护栏待 Spike 校正
+max_driver_mb = 8192
+
+[postprocess]
+semantic_correction = "none"   # none / cuda-bf16（默认关闭：收益 0.08pp，过纠风险 40%）
+itn_enabled = true             # ITN 默认开启（-0.67pp CER，1.6s，无 GPU 依赖）
+corrector_model = "twnlp/ChineseErrorCorrector4-4B"
+corrector_max_segment_chars = 600   # 600 字为实测最优分段
+verify_edit_ratio_threshold = 0.10  # 单段编辑 >10% 整段回退
+
+[progress]
+eta_warmup_chunks = 4          # 完成若干 chunk 后才给 ETA
+ewma_alpha = 0.3
+
+[server]
+cors_origins = ["http://127.0.0.1:8730", "http://localhost:8730"]
+max_upload_mb = 2048
+session_token = "random"       # 启动时生成随机本地会话令牌

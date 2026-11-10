@@ -1,0 +1,37 @@
+/* AudioTranscriber 全局样式（覆盖脚手架默认） */
+:root {
+  --at-border: #dcdfe6;
+  --at-bg: #f5f7fa;
+  --at-text: #303133;
+  --at-muted: #909399;
+  --at-primary: #409eff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
+  color: var(--at-text);
+  background: var(--at-bg);
+  font-size: 14px;
+  /* 移动端：禁止 iOS 横屏放大字号；兜底避免个别长串把整页撑出横向滚动 */
+  -webkit-text-size-adjust: 100%;
+  overflow-x: hidden;
+}
+
+/* 时间码统一等宽 */
+.timecode {
+  font-family: Consolas, 'Courier New', monospace;
+  color: var(--at-muted);
+  font-size: 12px;
+}
