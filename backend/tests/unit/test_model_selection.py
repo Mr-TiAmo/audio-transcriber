@@ -176,10 +176,11 @@ def test_start_run_records_model_and_passes_dir(tmp_path, monkeypatch):
     assert len(_FakeThread.created) == 1
     thread = _FakeThread.created[0]
     assert thread.started
-    # 线程参数倒数第二位是解析后的模型目录（_execute 用它构造
-    # OrchestrationOptions），末位是快速模式开关；
+    # 线程参数末尾依次是模型目录、快速模式、交叉验证开关
+    # （_execute 用它们构造 OrchestrationOptions）；
     # TaskService 以关键字方式构造 Thread，位置参数在 kwargs["args"] 里
-    assert thread.kwargs["args"][-2] == svc.cfg.paths.models / "Qwen3-ASR-1.7B"
+    assert thread.kwargs["args"][-3] == svc.cfg.paths.models / "Qwen3-ASR-1.7B"
+    assert thread.kwargs["args"][-2] is False
     assert thread.kwargs["args"][-1] is False
 
 
@@ -191,11 +192,13 @@ class _FakeTasks:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
         self.fast_flags: list[bool] = []
+        self.cross_flags: list[bool] = []
 
     def start_run(self, project_id: str, model: str = DEFAULT_ASR_MODEL,
-                  fast: bool = False) -> str:
+                  fast: bool = False, cross_check: bool = False) -> str:
         self.calls.append((project_id, model))
         self.fast_flags.append(fast)
+        self.cross_flags.append(cross_check)
         if model not in ASR_MODELS:
             raise TaskError(f"未知模型：{model}")
         return "run_test"
@@ -252,6 +255,24 @@ def test_create_run_passes_fast_mode(tmp_path):
         "/api/v1/projects/prj_1/runs", json={"model": "0.6b", "fast": True})
     assert resp.status_code == 200
     assert tasks.fast_flags == [True]
+
+
+def test_create_run_cross_check_defaults_off(tmp_path):
+    """交叉验证默认关闭：不传 crossCheck 或传 false 都不启用。"""
+    tasks = _FakeTasks()
+    client = _make_client(_make_cfg(tmp_path), tasks)
+    assert client.post("/api/v1/projects/prj_1/runs").status_code == 200
+    assert client.post(
+        "/api/v1/projects/prj_1/runs", json={"crossCheck": False}).status_code == 200
+    assert tasks.cross_flags == [False, False]
+
+
+def test_create_run_passes_cross_check(tmp_path):
+    tasks = _FakeTasks()
+    resp = _make_client(_make_cfg(tmp_path), tasks).post(
+        "/api/v1/projects/prj_1/runs", json={"crossCheck": True})
+    assert resp.status_code == 200
+    assert tasks.cross_flags == [True]
 
 
 def test_create_run_unknown_model_returns_409(tmp_path):

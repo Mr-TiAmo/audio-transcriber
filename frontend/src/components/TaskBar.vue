@@ -14,6 +14,10 @@ const models = ref<AsrModel[]>([])
 const selectedModel = ref('0.6b')
 // 快速模式：跳过 ForcedAligner 字符级对齐（省 2–6s），句级时间戳退回按字数插值
 const fastMode = ref(false)
+// 交叉验证：默认关闭；勾选后第二模型（FunASR，CPU）整片转写，
+// 仅核验低置信词组/词语（两模型一致的词取消标亮）。第二模型与主推理
+// 并行，短音频额外等待约 30–48s，长音频大部分被主推理覆盖。
+const crossCheckMode = ref(false)
 
 async function refreshModels() {
   try {
@@ -47,7 +51,8 @@ async function start() {
   if (starting.value) return
   starting.value = true
   try {
-    await store.startTranscription(selectedModel.value, fastMode.value)
+    await store.startTranscription(
+      selectedModel.value, fastMode.value, crossCheckMode.value)
   } catch (err) {
     ElMessage.error(`启动失败：${(err as Error).message}`)
   } finally {
@@ -135,7 +140,7 @@ const modelKey = computed(() => {
 // 下限 4s（短音频的 ITN/入库固定开销）、上限 3min
 const postEstimateMs = computed(() => {
   const durMs = store.project?.duration_ms ?? 0
-  return Math.min(180_000, Math.max(4_000, durMs * 0.03))
+  return Math.min(60_000, Math.max(3_000, durMs * 0.002 + 4_000))
 })
 
 // 窗口进度到达时校准 ASR 总时长估计（实际比经验值慢时以实际为准）。
@@ -152,8 +157,18 @@ watch(() => store.run.progress_percent, (percent) => {
 watch(() => store.run.id, () => {
   asrCalibMs.value = null
   phaseStartMs.value = Date.now()
-  etaDeadlineMs.value = null
+  etaDeadlineMs.value = null; asrDoneTs.value = null
 })
+
+  // ASR 推理完成后的尾部预算（窗口进度 >= 99% 后，后端仍在做对齐/交叉验证比对，
+  // 无额外进度事件，进度条需要按时间持续推进而非停在 85% 不动）。
+  const asrDoneTs = ref<number | null>(null)
+  const ASR_TAIL_BUDGET_MS = 25_000
+  watch(() => store.run.progress_percent, (pct) => {
+    if (pct >= 99 && asrDoneTs.value === null) {
+      asrDoneTs.value = Date.now()
+    }
+  })
 
 // ASR 阶段预计时长：音频时长 × RTF + 模型加载（经验值）
 // 经验值保证进度条在两次窗口事件之间按时间均匀推进；
@@ -161,7 +176,7 @@ watch(() => store.run.id, () => {
 const asrTotalMs = computed(() => {
   const est = MODEL_EST[modelKey.value] ?? MODEL_EST['0.6b']!
   const durMs = store.project?.duration_ms ?? 0
-  const base = Math.max(durMs * est.rtf + est.loadMs, 1000)
+  const base = Math.max(durMs * est.rtf + est.loadMs, 20_000)
   return Math.max(base, asrCalibMs.value ?? 0)
 })
 
@@ -226,8 +241,15 @@ const rawPercent = computed(() => {
   // 预计时长内线性推进到 75%，超出后指数逼近 85：既保持「一直在动」，
   // 又不会在严重低估（如 1.7B 显存溢出变慢）时虚报 85% 后僵住
   const byTime = ratio <= 1 ? ratio * 75 : 75 + 10 * (1 - Math.exp(-(ratio - 1)))
-  const byReal = store.run.progress_percent * 0.85
-  return Math.min(85, Math.max(byTime, byReal))
+  const byReal = (() => {
+    const base = store.run.progress_percent * 0.85
+    if (asrDoneTs.value === null) return base
+    // 推理窗口已完成，用尾部预算持续推进（25s 从 85% 升到 95%）：
+    // 覆盖交叉验证比对/对齐等无进度事件的尾部，避免进度条停在 85% 不动。
+    const tail = Math.min(1, (nowMs.value - asrDoneTs.value) / ASR_TAIL_BUDGET_MS)
+    return base + tail * 10
+  })()
+  return Math.min(95, Math.max(byTime, byReal))
 })
 
 // 进度只前进不后退：窗口事件校准（asrCalibMs 变大 → 总时长变大 → 估算比例
@@ -251,6 +273,10 @@ watch(
 // 此时不能再显示「即将完成」，改为如实提示「仍在处理」
 const overrun = computed(() => {
   if (store.run.status !== 'PROCESSING') return false
+  // 项目未加载完毕（duration_ms 未知）时不触发超限，
+  // 避免 asrTotalMs 跌到底线 10s 导致刚启动就误报「超出预估」。
+  const durMs = store.project?.duration_ms
+  if (durMs == null || durMs === 0) return false
   const stage = store.stageText
   if (stage === '保存片段') return false
   if (stage === '纠错与数字规范化') {
@@ -258,8 +284,8 @@ const overrun = computed(() => {
   }
   // ASR/预检：估算的完成时刻已过，或耗时明显超出 ASR 预算。
   // 前者保证 ETA 归零的同一刻就切换文案，不会停留在「预计还需约 0 秒 / 即将完成」
-  return (etaDeadlineMs.value !== null && nowMs.value > etaDeadlineMs.value)
-    || elapsedMs.value > asrTotalMs.value * 1.15
+  return (etaDeadlineMs.value !== null && nowMs.value > etaDeadlineMs.value + 10_000)
+    || elapsedMs.value > asrTotalMs.value * 2.0
 })
 
 function fmtSpan(ms: number): string {
@@ -312,8 +338,16 @@ const timingText = computed(() => {
       class="fast-mode"
       size="small"
       :disabled="starting"
-      title="跳过字级时间戳对齐，省 2–6 秒；句级跳转按字数插值"
+      title="跳过字级时间戳对齐"
     >快速</el-checkbox>
+    <el-checkbox
+      v-if="models.length && store.run.status !== 'PROCESSING'"
+      v-model="crossCheckMode"
+      class="cross-check"
+      size="small"
+      :disabled="starting"
+      title="第二模型核验低置信词组"
+    >交叉验证</el-checkbox>
 
     <template v-if="store.run.status === 'PROCESSING'">
       <el-progress
@@ -394,7 +428,8 @@ const timingText = computed(() => {
   width: 170px;
 }
 
-.fast-mode {
+.fast-mode,
+.cross-check {
   margin-right: -6px;
   font-size: 12px;
 }

@@ -476,9 +476,12 @@ def _build_segment_payloads(
                               if sample_texts and i in sample_texts else None),
             align_features=(align_feats.get(i) if align_feats else None),
         )
-        # 第二模型交叉验证：不一致的字符在 score_signal 中固定加分
+        # 第二模型交叉验证：本段成功映射才标记 cross_checked（映射失败
+        # 不能当作「两模型一致」，否则会误取消该段全部低置信词）。
+        # 不一致字符只影响后续「低置信词核验」，不参与选词打分。
         seg_cross = (cross_flags or {}).get(i)
-        if seg_cross:
+        if seg_cross is not None:
+            sig.cross_checked = True
             for ch_sig in sig.chars:
                 if ch_sig is not None and ch_sig.index < len(seg_cross) \
                         and seg_cross[ch_sig.index]:

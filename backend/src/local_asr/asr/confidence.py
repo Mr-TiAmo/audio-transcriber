@@ -84,6 +84,9 @@ class SegmentSignals:
     text_anomaly_count: int = 0
     align_anomaly_count: int = 0
     spans: list[list[int]] = field(default_factory=list)
+    # 本段是否已成功获得第二模型比对结果：只有 True 的段才允许用
+    # 「一致/不一致」决定保留或取消低置信词（映射失败不能当作一致）。
+    cross_checked: bool = False
     risk_score: float = 0.0
     risk_flags: list[str] = field(default_factory=list)
 
@@ -129,16 +132,15 @@ def align_ops(ref: str, hyp: str) -> list[tuple[str, int | None, int | None]]:
 # ---------------------------------------------------------------------------
 # 第二模型交叉验证（两模型不一致 = 可疑）
 # ---------------------------------------------------------------------------
-# bench_10min 实测（Qwen3-ASR 0.6B vs FunASR Paraformer-zh）：
+# 历史实测（bench_10min，Qwen3-ASR 0.6B vs FunASR Paraformer-zh）：
 #   不一致           标 35 字  P=40.0%  R=42.4%
 #   entropy 1%/0.8   标 16 字  P=43.8%  R=21.2%
-# 即召回翻倍、精确率仅降约 4 个百分点；融合排序（entropy + 1.0×不一致）
-# 在 2%/3% 预算下 P/R 双升。因此不一致给固定加分，由预算统一截断。
-CROSS_BONUS = 1.0
-# 交叉验证字符作为独立第二档：不受段门控与分数下限约束，但有安全上限。
-# bench 实测「不一致」42 字 P=52%/R=58%，而叠加 1% 预算截断后只剩
-# 25 字 P=52%/R=34%——预算会浪费召回，故单独成档。
-CROSS_MAX_RATIO = 0.05
+# 当时的口径（不一致直接参与标亮）已于 2026-11-10 按用户需求调整：
+# 交叉验证改为「页面勾选、只核验低置信词」：
+# 勾选后第二模型仍整片转写（固定开销约 30–48s），但比对结果**不参与选词**，
+# 只核验已选出的低置信词——词内全部一致 → 取消标亮，存在不一致 → 保留
+# 整词。不再把不一致字符作为独立第二档追加，也不给 cross_mismatch 加分，
+# 否则会标出低置信词之外的字。
 
 # 归一化：仅保留 CJK / 字母 / 数字（与 eval_cer、confidence_build_dataset 同口径）
 _KEEP = re.compile(r"[^一-鿿㐀-䶿a-zA-Z0-9]")
@@ -394,6 +396,72 @@ def merge_positions(sorted_pos: list[int]) -> list[list[int]]:
     return merged
 
 
+# ---------------------------------------------------------------------------
+# 词级标亮（标亮粒度：词语/词组）
+# ---------------------------------------------------------------------------
+
+def word_ranges(text: str) -> list[tuple[int, int]]:
+    """用 jieba 分词得到 ``[start, end)`` 词区间。
+
+    返回区间按顺序覆盖全文；极少数情况下分词结果与原文长度不一致
+    （异常空白/特殊字符）时退化为逐字区间，保证坐标始终可用。
+    """
+    import jieba
+
+    ranges: list[tuple[int, int]] = []
+    pos = 0
+    for word in jieba.lcut(text):
+        end = pos + len(word)
+        ranges.append((pos, end))
+        pos = end
+    if pos != len(text):
+        return [(i, i + 1) for i in range(len(text))]
+    return ranges
+
+
+def expand_positions_to_words(
+    text: str,
+    positions: list[int],
+    *,
+    chars: list[CharSignal | None] | None = None,
+    cross_checked: bool = False,
+) -> list[int]:
+    """把低置信字符位置扩展到所在词语边界，返回排序去重后的位置。
+
+    ``cross_checked=True``（页面勾选了交叉验证且第二模型文本可用）时，
+    以词为单位核验第二模型一致性：词内有任一 ``cross_mismatch`` 字符
+    则保留整词，否则视为两模型一致、取消该词标亮。
+    """
+    if not positions or not text:
+        return []
+    ranges = word_ranges(text)
+    owner: list[tuple[int, int]] = [(-1, -1)] * len(text)
+    for ws, we in ranges:
+        for i in range(ws, min(we, len(text))):
+            owner[i] = (ws, we)
+
+    words: dict[tuple[int, int], None] = {}
+    for pos in positions:
+        if not 0 <= pos < len(text):
+            continue
+        ws, we = owner[pos]
+        if ws < 0:  # 分词区间之外的防御：按单字处理
+            ws, we = pos, pos + 1
+        words[(ws, we)] = None
+
+    out: list[int] = []
+    for ws, we in words:
+        if cross_checked and chars is not None:
+            has_mismatch = any(
+                c is not None and c.cross_mismatch
+                for c in chars[ws:min(we, len(chars))]
+            )
+            if not has_mismatch:
+                continue
+        out.extend(range(ws, min(we, len(text))))
+    return sorted(set(out))
+
+
 def token_char_spans(token_features, text: str, tokenizer) -> list[tuple[int, int, dict]]:
     """把逐 token 特征映射为 text 上的 (start, end, features) 跨度。
 
@@ -554,9 +622,8 @@ def score_signal(sig: CharSignal, mode: str = "balanced") -> float:
     elif mode == "recall":
         score += 0.35 * min(sig.align_abs_z, 4.0)
         score += 0.3 * int(sig.align_short) + 0.3 * int(sig.align_long)
-    if sig.cross_mismatch:
-        # 与第二模型不一致：与档位无关的独立加分（bench 2% 预算 P 33→37%）
-        score += CROSS_BONUS
+    # 交叉验证信号（cross_mismatch）不参与选词：它只在选词完成后核验
+    # 低置信词（见 select_low_conf 的 cross_checked），避免引入词外标亮。
     return score
 
 
@@ -576,33 +643,29 @@ def select_low_conf(
     mode: str = "balanced",
     max_ratio: float = DEFAULT_MAX_RATIO,
     score_floor: float = LOW_CONF_SCORE_FLOOR,
+    word_level: bool = True,
 ) -> int:
-    """全局预算截断，把选中位置写回每段的 ``spans``。
+    """全局预算截断，把选中位置（扩展到词语）写回每段的 ``spans``。
 
     - 候选：单字 token（多字 token 会整词误报）；
     - 排除低于 ``score_floor`` 的极低熵字；
     - 按全片信息字符数的 ``max_ratio`` 取 top-K；
-    - **第二档**：与第二模型不一致（``cross_mismatch``）的字符不受段门控
-      与 ``score_floor`` 限制，按 ``CROSS_MAX_RATIO`` 上限追加（去重）。
-      这类字符熵往往不高（模型很自信但两模型不同），走常规门控会漏掉。
-    返回标亮字符总数。
+    - ``word_level``（默认开）：选中字扩展到 jieba 词语边界，标亮粒度
+      由单字变为词组/词语；输出仍是字符区间，入库与前端无需改动；
+    - 段标记 ``SegmentSignals.cross_checked``（页面勾选交叉验证且该段
+      成功映射第二模型文本时）：以词为单位核验一致性——词内全部一致
+      则取消标亮，存在不一致则保留整词；不额外追加其它不一致字符
+      （第二模型结果只作用于低置信词）。
+    返回标亮字符总数（词级扩展后的字符数）。
     """
     total_info = sum(1 for seg in segments for ch in seg.text if keep_char(ch))
     budget = max(1, int(math.ceil(total_info * max(0.0, max_ratio))))
-    cross_budget = max(1, int(math.ceil(total_info * CROSS_MAX_RATIO)))
     cands: list[tuple[float, int, CharSignal]] = []
-    cross_cands: list[tuple[float, int, CharSignal]] = []
     for seg in segments:
         seg.spans = []
         gate = _gate_open(seg)
         for sig in seg.chars:
             if sig is None:
-                continue
-            if sig.cross_mismatch:
-                # 交叉验证档只看融合分排序（含 CROSS_BONUS），不受门控/floor；
-                # 且**不占常规预算**——否则加分后会把纯 entropy 的高价值候选
-                # 挤出预算（bench 实测 P 52%→27%），第二档本身已覆盖它们。
-                cross_cands.append((score_signal(sig, mode), seg.seq, sig))
                 continue
             if not gate or not sig.single_token:
                 continue
@@ -613,23 +676,16 @@ def select_low_conf(
     cands.sort(key=lambda x: x[0], reverse=True)
     picked = cands[:budget]
     by_seg: dict[int, list[int]] = {}
-    seen: set[tuple[int, int]] = set()
     for _, seq, sig in picked:
         by_seg.setdefault(seq, []).append(sig.index)
-        seen.add((seq, sig.index))
-    cross_cands.sort(key=lambda x: x[0], reverse=True)
-    added = 0
-    for _, seq, sig in cross_cands:
-        if added >= cross_budget:
-            break
-        if (seq, sig.index) in seen:
-            continue
-        by_seg.setdefault(seq, []).append(sig.index)
-        seen.add((seq, sig.index))
-        added += 1
+
     marked = 0
     for seg in segments:
         positions = sorted(by_seg.get(seg.seq, []))
+        if word_level or seg.cross_checked:
+            positions = expand_positions_to_words(
+                seg.text, positions, chars=seg.chars,
+                cross_checked=seg.cross_checked)
         seg.spans = merge_positions(positions)
         marked += len(positions)
     return marked

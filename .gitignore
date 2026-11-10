@@ -12,6 +12,7 @@ frontend/node_modules/
 # E2E / Playwright 产物
 frontend/e2e/shots/
 frontend/e2e/results/
+frontend/e2e/verify-*.mjs
 frontend/test-results/
 frontend/playwright-report/
 

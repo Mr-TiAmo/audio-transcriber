@@ -86,9 +86,10 @@ export const useWorkbenchStore = defineStore('workbench', () => {
   // ------------------------------------------------------------------
   // model：0.6b（默认，快速）/ 1.7b（高质量），由任务栏下拉框传入；
   // fast：快速模式，跳过字符级对齐（省 2–6s，句级时间戳按字数插值）
-  async function startTranscription(model = '0.6b', fast = false) {
+  // crossCheck：第二模型交叉验证（默认关闭，勾选后固定增加约 30–48s）
+  async function startTranscription(model = '0.6b', fast = false, crossCheck = false) {
     if (!project.value || running.value) return
-    const { runId } = await api.startRun(project.value.id, model, fast)
+    const { runId } = await api.startRun(project.value.id, model, fast, crossCheck)
     // started_at 记为本地时刻：任务栏据此显示「已处理多久」（SSE 快照到达后
     // 会以 DB 时间为准，刷新页面也能恢复）
     run.value = { ...run.value, id: runId, status: 'PROCESSING', stage: 'VALIDATING',

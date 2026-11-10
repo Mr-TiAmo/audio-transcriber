@@ -27,6 +27,8 @@ dependencies = [
     "typer>=0.12",
     "rich>=13",
     "wetext>=0.2.1",
+    # 低置信标亮的词级扩展（单字候选 → 词语/词组粒度）
+    "jieba>=0.42",
     "portalocker>=2.10",
     # FunASR fsmn-vad 特征提取的 fbank 后端（长音频 VAD 主路径必需；
     # torchaudio 需与 torch 版本耦合且体积大，选轻量 knf wheel）

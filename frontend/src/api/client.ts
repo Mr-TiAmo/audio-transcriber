@@ -49,9 +49,11 @@ export const api = {
   // 任务
   // 模型列表：未安装的模型 available=false，前端下拉置灰
   listModels: () => request<AsrModel[]>('GET', '/models'),
-  startRun: (projectId: string, model = '0.6b', fast = false) =>
+  // crossCheck：第二模型交叉验证（默认关闭，勾选后才整片跑 FunASR，
+  // 结果仅核验低置信词组/词语）
+  startRun: (projectId: string, model = '0.6b', fast = false, crossCheck = false) =>
     request<{ runId: string; status: string }>(
-      'POST', `/projects/${projectId}/runs`, { model, fast }),
+      'POST', `/projects/${projectId}/runs`, { model, fast, crossCheck }),
   cancelRun: (projectId: string, runId: string) =>
     request<{ runId: string; status: string }>('POST', `/projects/${projectId}/runs/${runId}/cancel`),
   currentTask: () => request<RunInfo>('GET', '/tasks/current'),

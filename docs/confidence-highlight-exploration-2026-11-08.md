@@ -266,3 +266,29 @@ CLI 可手动强制。进一步优化（复用 VAD、主进程内加载）暂不
 耗时增加约 4–9%；实现上任何失败都降级为纯 entropy，不影响主流程。
 注意：样本只有 38 个真实错误，精确率有 ±8pp 量级的统计波动，规模化
 数据（LiPS 全量）可进一步校准 `CROSS_MAX_RATIO`。
+
+## 6. 2026-11-10 交互调整：词级标亮 + 交叉验证页面开关
+
+用户确认的两项调整（取代上文 §5.4/§5.5 的交互口径）：
+
+1. **标亮粒度由单字改为词组/词语**：`select_low_conf()` 选出字符后，
+   用 jieba 分词把每个候选扩展到所在词边界再合并
+   （`expand_positions_to_words`）。输出仍是 `[[start,end],...]` 字符
+   区间，`segment_service` 的切片/去重平移与前端 `<mark>` 渲染不变。
+   §5.1 历史实测整词扩展会把字符级精确率从 23.0% 降到 15.9%，这是
+   用户明确选择的“可读性优先”取舍。
+2. **交叉验证改为页面可选、默认关闭**：转写请求新增 `crossCheck`
+   （默认 `false`），`TaskBar.vue` 增加「交叉验证」复选框；删除
+   `task_service` 中“音频 ≥10min 自动启用”的逻辑。勾选后 FunASR 仍
+   整片转写（约 30–48s 固定开销），但结果**不参与选词、不再作为第二档
+   追加**，只核验已选出的低置信词：词内全部一致 → 取消该词标亮；
+   存在不一致 → 保留整词。第二模型缺失/失败时视同未勾选。
+3. **测试**：`test_confidence.py` 新增词级扩展、交叉核验（一致取消/
+   不一致保留/不追加词外字符）用例；`test_model_selection.py` 覆盖
+   `crossCheck` 默认关闭与透传。
+
+对应实现：`backend/src/local_asr/asr/confidence.py` 的
+`word_ranges` / `expand_positions_to_words` / `select_low_conf`；
+`backend/src/app/api/v1/router.py`、`backend/src/app/services/task_service.py`；
+`frontend/src/components/TaskBar.vue`、`frontend/src/stores/workbench.ts`、
+`frontend/src/api/client.ts`。

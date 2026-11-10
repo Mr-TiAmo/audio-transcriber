@@ -116,7 +116,7 @@ class TaskService:
     # 创建并启动任务
     # ------------------------------------------------------------------
     def start_run(self, project_id: str, model: str = DEFAULT_ASR_MODEL,
-                  fast: bool = False) -> str:
+                  fast: bool = False, cross_check: bool = False) -> str:
         project = self.db.query_one("SELECT * FROM projects WHERE id=?", (project_id,))
         if not project:
             raise TaskError("项目不存在")
@@ -144,7 +144,7 @@ class TaskService:
 
         thread = threading.Thread(
             target=self._execute,
-            args=(run_id, project_id, work_dir, output_dir, model_dir, fast),
+            args=(run_id, project_id, work_dir, output_dir, model_dir, fast, cross_check),
             name=f"task-{run_id}", daemon=True,
         )
         thread.start()
@@ -187,7 +187,8 @@ class TaskService:
             self.hub.publish({"runId": run_id, "kind": "progress_updated", "percent": percent})
 
     def _execute(self, run_id: str, project_id: str, work_dir: Path,
-                 output_dir: Path, model_dir: Path, fast: bool = False) -> None:
+                 output_dir: Path, model_dir: Path, fast: bool = False,
+                 cross_check: bool = False) -> None:
         """后台线程：驱动编排层（子进程执行 ASR + 后处理），全程发 SSE 事件。"""
         project = self.db.query_one("SELECT * FROM projects WHERE id=?", (project_id,))
         pcm = self.cfg.paths.projects / project_id / "audio" / project["pcm_path"]
@@ -227,11 +228,12 @@ class TaskService:
                 overlap=1.5,
                 vad_model=self.cfg.paths.models / "funasr-fsmn-vad",
                 aligner=aligner_dir if aligner_dir.is_dir() and not fast else None,
-                # 第二模型交叉验证（FunASR Paraformer）：两模型不一致的字符作为
-                # 独立第二档标亮，bench 召回 29%→66%、精度持平。FunASR 子进程
-                # 有约 48s 固定开销（加载 26s + 推理 16s），短音频占比过高，
-                # 故仅对长音频（≥10min）启用；模型缺失或失败时脚本内部降级。
-                cross_check="auto" if duration_ms >= 10 * 60 * 1000 else None,
+                # 第二模型交叉验证（FunASR Paraformer）：由页面「交叉验证」
+                # 复选框决定，默认关闭（不再按音频长度自动启用）。勾选后第二
+                # 模型整片转写（CPU 约 30–48s 固定开销），结果只核验低置信
+                # 词组/词语：一致取消标亮、不一致保留；模型缺失或失败时脚本
+                # 内部降级，视为未核验。
+                cross_check="auto" if cross_check else None,
             )
             # Windows 单 venv：ASR 与后处理共用当前解释器（V3.0 §2.4 跨 venv 能力保留，
             # 环境显式注入避免依赖目录探测）

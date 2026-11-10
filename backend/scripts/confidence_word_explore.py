@@ -284,7 +284,9 @@ def cross_model_table(labels, hyp_norm: str, other_text: str,
     """输出交叉验证一致性的 P/R（独立信号，不做预算）。
 
     传入 ``marked`` 时额外输出「第二档并集」：不一致字符全量追加到当前
-    标亮（``select_low_conf`` 的 CROSS_MAX_RATIO 档），这是生产落地口径。
+    标亮。注意：这是 2026-11-08 的历史评估口径；2026-11-10 起生产改为
+    「页面勾选交叉验证、只核验低置信词（一致取消/不一致保留）」，
+    不再追加词外不一致字符。
     """
     flags = cross_model_flags(hyp_norm, other_text)
     m = pr(flags, labels)

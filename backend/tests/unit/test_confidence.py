@@ -9,7 +9,6 @@ from __future__ import annotations
 import pytest
 
 from local_asr.asr.confidence import (
-    CROSS_BONUS,
     DEFAULT_MAX_RATIO,
     CharSignal,
     SegmentSignals,
@@ -210,11 +209,13 @@ def test_score_signal_modes():
     assert score_signal(sig, "recall") == pytest.approx(0.5 + 0.35 * 2 + 0.3)
 
 
-def test_score_signal_cross_mismatch_bonus_all_modes():
-    """第二模型不一致是与档位无关的独立加分。"""
-    sig = CharSignal(index=0, entropy=0.1, cross_mismatch=True)
+def test_score_signal_ignores_cross_mismatch():
+    """交叉验证不参与选词打分，只在选词后核验低置信词。"""
+    base = CharSignal(index=0, entropy=0.1)
+    mismatched = CharSignal(index=0, entropy=0.1, cross_mismatch=True)
     for mode in ("balanced", "quality", "recall"):
-        assert score_signal(sig, mode) == pytest.approx(0.1 + CROSS_BONUS)
+        assert score_signal(mismatched, mode) == pytest.approx(
+            score_signal(base, mode))
 
 
 # ---------------------------------------------------------------------------
@@ -288,8 +289,9 @@ def test_select_low_conf_respects_global_budget():
     # 两段各 50 字，总信息字符 100，比例 4% → 预算 4
     segs = [_seg(0, "甲" * 50, [1.0 - i * 0.01 for i in range(50)]),
             _seg(1, "乙" * 50, [0.9 - i * 0.01 for i in range(50)])]
-    # 显式用 4% 预算验证比例逻辑（默认值已改为 1%，与预算语义无关）
-    marked = select_low_conf(segs, max_ratio=0.04)
+    # 显式用 4% 预算验证比例逻辑（默认值已改为 1%，与预算语义无关）；
+    # 关闭词级扩展以断言按预算选出的字符数
+    marked = select_low_conf(segs, max_ratio=0.04, word_level=False)
     assert marked == 4
     assert sum(e - s for s, e in segs[0].spans) + \
         sum(e - s for s, e in segs[1].spans) == 4
@@ -312,42 +314,90 @@ def test_select_low_conf_ignores_multi_char_tokens():
 
 def test_select_low_conf_score_floor():
     seg = _seg(0, "甲" * 20, [0.85] + [0.05] * 19)
-    marked = select_low_conf([seg], max_ratio=0.5, score_floor=0.1)
+    marked = select_low_conf([seg], max_ratio=0.5, score_floor=0.1, word_level=False)
     assert marked == 1
     assert seg.spans == [[0, 1]]
 
 
 def test_select_low_conf_budget_at_least_one():
     seg = _seg(0, "甲" * 5, [1.0] * 5)
-    # ceil(5 * 0.01) = 1，预算至少 1
-    assert select_low_conf([seg], max_ratio=0.01) == 1
+    # ceil(5 * 0.01) = 1，预算至少 1（关闭词级扩展）
+    assert select_low_conf([seg], max_ratio=0.01, word_level=False) == 1
 
 
-def test_select_low_conf_cross_mismatch_bypasses_gate():
-    """交叉验证是独立第二档：段门控关闭、熵很低也照样标。"""
-    seg = _seg(0, "甲乙丙丁", [0.05] * 4)  # 单字最高熵 0.05 < 0.7，门控关
-    seg.chars[2].cross_mismatch = True
-    assert select_low_conf([seg], max_ratio=0.01, score_floor=0.8) == 1
-    assert seg.spans == [[2, 3]]
+# ---------------------------------------------------------------------------
+# 词级标亮（单字候选 → 词语/词组）
+# ---------------------------------------------------------------------------
+
+_WORD_TEXT = "我们讨论游泳比赛马上开始"
+# jieba 分词：我们 / 讨论 / 游泳 / 比赛 / 马上 / 开始
 
 
-def test_select_low_conf_cross_mismatch_respects_cap():
-    """不一致字符过多时受 CROSS_MAX_RATIO 安全上限约束。"""
-    seg = _seg(0, "甲" * 100, [0.1] * 100)
-    for ch in seg.chars:
-        ch.cross_mismatch = True
-    # 常规预算因门控关闭为 0；交叉档 ceil(100 * 0.05) = 5
-    assert select_low_conf([seg], max_ratio=0.01) == 5
-    assert seg.spans == [[0, 5]]
+def _word_seg(high_char: str) -> SegmentSignals:
+    """只在 high_char 上给高熵，其余字低于分数下限。"""
+    entropies = [0.01] * len(_WORD_TEXT)
+    entropies[_WORD_TEXT.index(high_char)] = 2.0
+    return _seg(0, _WORD_TEXT, entropies)
 
 
-def test_select_low_conf_cross_mismatch_does_not_eat_budget():
-    """交叉字符走第二档，不占常规预算（否则会挤掉纯 entropy 候选）。"""
-    seg = _seg(0, "甲" * 50, [1.0] * 50)
-    seg.chars[0].cross_mismatch = True
-    # 常规预算 1 个 → 从非 cross 候选中选（index 1）；第二档再加 index 0
-    assert select_low_conf([seg], max_ratio=0.01) == 2
-    assert seg.spans == [[0, 2]]
+def test_select_low_conf_expands_to_word_level():
+    """单个高熵字扩展为所在词语，标亮粒度由单字变为词组。"""
+    seg = _word_seg("游")
+    marked = select_low_conf([seg], max_ratio=0.5)
+    # 「游」属于「游泳」→ 标亮 [4, 6)
+    assert seg.spans == [[4, 6]]
+    assert marked == 2
+
+
+def test_select_low_conf_word_level_off_keeps_single_char():
+    seg = _word_seg("游")
+    marked = select_low_conf([seg], max_ratio=0.5, word_level=False)
+    assert seg.spans == [[4, 5]]
+    assert marked == 1
+
+
+# ---------------------------------------------------------------------------
+# 交叉验证：只核验低置信词（页面勾选）
+# ---------------------------------------------------------------------------
+
+def test_select_low_conf_cross_checked_keeps_mismatched_word():
+    """词内存在第二模型不一致 → 保留整词标亮。"""
+    seg = _word_seg("游")
+    seg.cross_checked = True
+    seg.chars[_WORD_TEXT.index("泳")].cross_mismatch = True
+    marked = select_low_conf([seg], max_ratio=0.5)
+    assert seg.spans == [[4, 6]]
+    assert marked == 2
+
+
+def test_select_low_conf_cross_checked_drops_consistent_word():
+    """词内全部与第二模型一致 → 取消该词标亮。"""
+    seg = _word_seg("游")
+    seg.cross_checked = True
+    marked = select_low_conf([seg], max_ratio=0.5)
+    assert marked == 0
+    assert seg.spans == []
+
+
+def test_select_low_conf_cross_checked_does_not_add_other_words():
+    """交叉验证结果只作用于已选低置信词，不追加其它不一致字符。"""
+    seg = _word_seg("游")
+    seg.cross_checked = True
+    seg.chars[_WORD_TEXT.index("泳")].cross_mismatch = True
+    # 「马上」不在低置信词内，不应被追加标亮
+    seg.chars[_WORD_TEXT.index("马")].cross_mismatch = True
+    marked = select_low_conf([seg], max_ratio=0.5)
+    assert seg.spans == [[4, 6]]
+    assert marked == 2
+
+
+def test_select_low_conf_unmapped_segment_keeps_low_conf():
+    """第二模型映射失败（cross_checked=False）的段不按「一致」误取消。"""
+    seg = _word_seg("游")
+    # 未标记 cross_checked：即使没有任何 mismatch，也保留低置信词
+    marked = select_low_conf([seg], max_ratio=0.5)
+    assert seg.spans == [[4, 6]]
+    assert marked == 2
 
 
 # ---------------------------------------------------------------------------

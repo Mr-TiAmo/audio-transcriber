@@ -125,9 +125,15 @@ class RunCreateRequest(BaseModel):
 
     fast=True 为「快速模式」：跳过 ForcedAligner 字符级对齐（省 2–6s），
     句级时间戳退回按字数插值，低置信标亮不受影响（只依赖 token entropy）。
+
+    crossCheck=True 为「交叉验证」：主模型推理后调用第二模型（FunASR
+    Paraformer，CPU）整片转写，仅核验低置信词组/词语——两模型一致的
+    词取消标亮、不一致的保留。第二模型与主推理并行，短音频额外等待
+    约 30–48s，默认关闭。
     """
     model: str = DEFAULT_ASR_MODEL
     fast: bool = False
+    crossCheck: bool = False
 
 
 @router.get("/models")
@@ -150,8 +156,10 @@ def list_models() -> list[dict]:
 def create_run(project_id: str, payload: RunCreateRequest | None = None) -> dict:
     model = payload.model if payload else DEFAULT_ASR_MODEL
     fast = payload.fast if payload else False
+    cross_check = payload.crossCheck if payload else False
     try:
-        run_id = _tasks_or_404().start_run(project_id, model=model, fast=fast)
+        run_id = _tasks_or_404().start_run(
+            project_id, model=model, fast=fast, cross_check=cross_check)
     except TaskError as exc:
         raise HTTPException(409, str(exc)) from exc
     return {"runId": run_id, "status": "PROCESSING"}
